@@ -34,7 +34,7 @@ use Getopt::Long;
 	--verbose           Show details of the running progress.
 	--help       		output help information to screen.
 
-=head1 Exmple
+=head1 Example
 
 	TEenrich-FET hg38.chrom.sizes hg38.repbase.bed CTCF.bed >CTCF.FET.txt
 
