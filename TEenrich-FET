@@ -1,0 +1,238 @@
+#!/usr/bin/perl
+use strict;
+use File::Basename;
+use warnings;
+use Getopt::Long;
+
+=head1 Name
+
+	TEenrich-FET: determine the enrichment of TE family within given genomic intervals using Fisher's Exact Test
+
+=head1 Description
+
+	This script compares each TE family against given genomic intervals to determine the enriched
+	TE families. The fisher function from BEDtools is invoked to perform the Fisher's Exact Test.
+	This script provides function for data filtering, FET analysis and result summarizing.
+
+=head1 Version
+
+	Author: Ming-an Sun	(mingansun@yzu.edu.cn)
+	Version: 1.1	Date: 2021-10-01
+	
+=head1 Usage
+
+  	TEenrich-FET [parameters]  chrom_size_file te_bed_file region_bed_file > outfile
+	
+	Input files:
+	
+	chrom_size_file      Chromosome size file downloaded from UCSC genome browser or generated customly
+	te_bed_file          TE coordinate file in BED format. The 4th column contains the TE family names. 
+	region_bed_file      Genomic interval file in BED format.
+	
+	Options:
+	
+	--verbose           Show details of the running progress.
+	--help       		output help information to screen.
+
+=head1 Exmple
+
+	TEenrich-FET hg38.chrom.sizes hg38.repbase.bed CTCF.bed >CTCF.FET.txt
+
+=cut
+
+## Get options
+my $verbose;
+my $help;
+
+GetOptions(
+	"verbose"  => \$verbose,
+	"help"     => \$help
+);
+
+die `pod2text $0` if (@ARGV != 3 || $help);
+
+my ($chr_file, $rep_file, $pks_file) = @ARGV;
+
+## Check input files, exist with error if unfound
+my $file_error = 0;
+unless(-e $chr_file){
+	warn "Error: $chr_file doesn't exist!\n";
+	$file_error = 1;
+}
+unless(-e $rep_file){
+	warn "Error: $rep_file doesn't exist!\n";
+	$file_error = 1;
+}
+unless(-e $chr_file){
+	warn "Error: $pks_file doesn't exist!\n";
+	$file_error = 1;
+}
+if($file_error == 1){
+	warn "Exit.\n";
+	exit(1);
+}
+
+## Check if BEDtools can be found in the path
+my $bedtool_error = `which bedtools`;
+unless($bedtool_error =~ /^\//){
+    warn "Error: cannot find BEDtools in the path.\n";
+    exit(1);
+}
+ 
+## Get the list of chromosome names and store as hash
+warn "Get chr names from chrom.size file ...\n";
+my %inf;
+for my $x (&get_chr($chr_file)){
+	if($verbose){
+		warn "$x\n";
+	}
+    $inf{$x} ++;
+}
+
+## Filter each file to only keep items from common chromosomes
+warn "Filter files to only keep common chromosomes\n";
+
+# set random prefix for temporary files
+my $rnd = rand();
+my $chr_file_cnv = "chr.tmp.". $rnd;
+my $rep_file_cnv = "rep.tmp.". $rnd;
+my $pks_file_cnv = "pks.tmp.". $rnd;
+
+# filter each file
+&filter_file($chr_file, "$chr_file_cnv", \%inf);
+&filter_file($rep_file, "$rep_file_cnv", \%inf);
+&filter_file($pks_file, "$pks_file_cnv", \%inf);
+
+## cut repeat file to each TE family
+warn "Cut repeat files to families ...\n";
+my %reps;
+open(REP, "$rep_file_cnv")||die"Cannot read $rep_file_cnv\n";
+while(my $ln = <REP>){
+    chomp $ln;
+    my @a = split(/\s+/, $ln);
+    push(@{$reps{$a[3]}}, $ln);
+}
+close REP;
+
+## Run Fisher's Exact Test for each TE family against given genomic regions
+warn "Perform FET ...\n";
+
+my $outdir = "$rep_file_cnv\.cut";
+`mkdir $outdir` unless -d $outdir;
+
+print "File\ta1_b1\ta1_b0\ta0_b1\ta0_b0\tp_left\tp_right\tp_both\tFoldEnrich\tOverlap_fraction\n";
+foreach my $x (sort keys %reps){
+    if(scalar(@{$reps{$x}}) < 100){
+		warn "$x skipped due to too few items: scalar(@{$reps{$x}}) < 100";
+		next;
+	}
+    my $y = $x;
+    $y =~ s/\:/\_/g;
+    $y =~ s/\//\_/g;
+    open(OUT, ">$outdir/${y}.bed")||die"Cannot write to $outdir/${y}.bed\n";
+    print OUT join("\n", @{$reps{$x}});
+    close OUT;
+    `bedtools fisher -g $chr_file_cnv -a $pks_file_cnv -b "$outdir/${y}.bed" >"$outdir/${y}.fisher" 2>"$outdir/${y}.log"`;
+    my $result = &parse_result("$outdir/${y}.fisher");
+    if($result =~ /ERROR/){
+        warn "$result\n";
+    }
+    else{
+        print "$result\n";
+    }
+    `rm "$outdir/${y}.bed"`;
+    `rm "$outdir/${y}.fisher"`;
+    `rm "$outdir/${y}.log"`;
+}
+
+## Clean temp files
+`rm -r $outdir`;
+`rm $chr_file_cnv`;
+`rm $rep_file_cnv`;
+`rm $pks_file_cnv`;
+
+warn "Done.\n";
+
+###################### subroutines ##################################
+
+# get chromosome names from chromsize file
+sub get_chr{
+    my $infile = shift;
+    my %tmp;
+    open(IN, $infile)||die"Cannot read $infile";
+    while(my $ln = <IN>){
+        if($ln =~ /^(\S+)/){
+            $tmp{$1} = '';
+        }
+    }
+    close IN;
+    return(keys(%tmp));
+}
+
+# filter files to only keep items from given chromosomes
+sub filter_file{
+    my ($infile, $outfile, $hashP) = @_;
+    open(IN, "cat $infile | sort -k1,1 -k2,2n |")||die"Cannot open $infile\n";
+    open(OUT, ">$outfile")||die"Cannot write to $outfile\n";
+    while(my $ln = <IN>){
+        my @a = split(/\s+/, $ln);
+        if(defined ${$hashP}{$a[0]}){
+			print OUT $ln;
+		}
+    }
+    close IN;
+    close OUT;
+}
+
+# Parse FET analysis results to extract required information
+# Number of query intervals: 11938
+# Number of db intervals: 31
+# Number of overlaps: 0
+# Number of possible intervals (estimated): 6916823
+# phyper(0 - 1, 11938, 6916823 - 11938, 31, lower.tail=F)
+# Contingency Table Of Counts
+#_________________________________________
+#           |  in -b       | not in -b    |
+#     in -a | 0            | 11938        |
+# not in -a | 31           | 6904854      |
+#_________________________________________
+# p-values for fisher's exact test
+#left    right   two-tail        ratio
+#0.94786 1       1       0.000
+sub parse_result{
+	my $infile = shift;
+    my ($a1_b1, $a1_b0, $a0_b1, $a0_b0, $p_left, $p_right, $p_both, $fold);
+    open(IN, $infile)||die"Cannot open $infile\n";
+    my @lines = <IN>;
+    close IN;
+    $infile =~ s/^[^\/]*\///;
+    $infile =~ s/\.fisher$//;
+    if(scalar(@lines)>=14){
+        foreach my $x (@lines){
+            if($x =~ /^\d/){
+                ($p_left, $p_right, $p_both, $fold) = split(/\s+/, $x);
+            }
+            if($x =~ /^\#\s+in\s+\-a\s+\|\s+(\d+)\s+\|\s+(\d+)/){
+                ($a1_b1, $a1_b0) = ($1, $2);
+            }
+            if($x =~ /^\#\s+not\s+in\s+\-a\s+\|\s+(\d+)\s+\|\s+(\d+)/){
+                ($a0_b1, $a0_b0) = ($1, $2);
+            }
+        }
+        # Ming-an Sun, 2021-10-24
+        # Fix bug of bedtools fisher: the p_left and p_right are incorrectly swapped when the p-value is as low as 0
+        if($fold > 1 && $p_right > $p_left){
+            ($p_left, $p_right) = ($p_right, $p_left);
+			if($verbose){
+				warn "Warn: p_left and p_right swapped for $infile.\n";
+			}
+        }
+        my $peak_frac = $a1_b1/($a1_b1 + $a1_b0);
+        return "$infile\t$a1_b1\t$a1_b0\t$a0_b1\t$a0_b0\t$p_left\t$p_right\t$p_both\t$fold\t$peak_frac";
+    }
+    else{
+        return "$infile\tERROR";
+    }
+}
+
+__END__
